@@ -1,0 +1,2 @@
+# Lets the logged-in user talk to the ARDOR GAMING Renegade Wireless receiver without root.
+KERNEL=="hidraw*", ATTRS{idVendor}=="25a7", ATTRS{idProduct}=="fa4a|fa4b", TAG+="uaccess"

@@ -1,0 +1,17 @@
+[package]
+name = "renegade"
+version = "0.1.0"
+edition = "2024"
+description = "Linux CLI and GUI for the ARDOR GAMING Renegade Wireless mouse (replaces OemDrv.exe)"
+license = "MIT"
+repository = "https://github.com/Gidrex/renegade-wireless-linux"
+readme = "README.md"
+keywords = ["mouse", "hidraw", "linux", "egui", "ardor"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+libc = "0.2"
+
+[profile.release]
+strip = true

@@ -1,0 +1,4 @@
+/target
+# Vendor installer and mouse memory dumps stay local.
+*.exe
+*.bin
