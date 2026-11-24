@@ -40,6 +40,8 @@ pub enum Button {
     Macro {
         /// Repeat mode.
         repeat: Repeat,
+        /// Name stored with the macro (shown by the Windows tool).
+        name: String,
         /// Event tokens.
         events: Option<String>,
     },
@@ -78,6 +80,7 @@ impl State {
                     let events = macros::decode(&data).map(|e| macros::describe(&e));
                     Button::Macro {
                         repeat: Repeat::from_code(action[2]),
+                        name: macros::decode_name(&data),
                         events,
                     }
                 }
@@ -220,13 +223,19 @@ pub fn set_button(dev: &mut Device, slot: usize, action: &str) -> Res<()> {
     dev.write_mem(at(BUTTONS, 4 * slot), &quad(b.action))
 }
 
-/// Writes a macro to a 0-based button slot and binds the button to it.
-pub fn set_macro(dev: &mut Device, slot: usize, repeat: Repeat, tokens: &[&str]) -> Res<()> {
+/// Writes a named macro to a 0-based button slot and binds the button to it.
+pub fn set_macro(
+    dev: &mut Device,
+    slot: usize,
+    repeat: Repeat,
+    name: &str,
+    tokens: &[&str],
+) -> Res<()> {
     let events = macros::parse(tokens)?;
     // OemDrv binds a macro as [6, slot, repeat].
     let action = [6, slot as u8, repeat.code()];
     ensure_left_kept(dev, slot, action)?;
-    dev.write_mem(macros::addr(slot), &macros::encode(&events))?;
+    dev.write_mem(macros::addr(slot), &macros::encode(&events, name))?;
     dev.write_mem(at(BUTTONS, 4 * slot), &quad(action))
 }
 

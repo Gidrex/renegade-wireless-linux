@@ -4,6 +4,7 @@ Rust CLI (`renegade`) + egui GUI (`renegade-gui`) for the ARDOR GAMING Renegade 
 Architecture, protocol, memory map and RE notes: `docs/DEVELOPMENT.md`. Read it before touching `src/`.
 
 - CLI and GUI must offer the same features. Every new feature: `config.rs`/`macros.rs` → `mouse.rs` → `main.rs` → GUI `Model`.
+- Buttons are numbered 1–8 as on the OemDrv mouse diagram; `config::BUTTON_SLOTS` maps them to memory slots.
 - User-facing text is Russian; code, comments and identifiers are English.
 - QA gate: `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 - Hardware writes: back up first (`renegade backup`), restore and `cmp` after. The mouse sleeps within seconds, so ask the user to keep moving it during hardware tests.
