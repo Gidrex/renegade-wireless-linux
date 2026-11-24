@@ -3,6 +3,9 @@
 //! All device I/O runs on a worker thread (the mouse may sleep and take seconds to answer);
 //! the UI edits a `Model` copy and "Применить" writes only the sections that differ from what was read.
 
+mod macro_editor;
+
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{env, fs, thread};
@@ -11,7 +14,8 @@ use eframe::egui::{
     self, Color32, ComboBox, CornerRadius, DragValue, FontData, FontDefinitions, FontFamily,
     FontId, Frame, Margin, RichText, Slider, Stroke, TextEdit, TextStyle, Theme, ThemePreference,
 };
-use renegade::config::{LEVELS, PHYSICAL_SLOTS, SLOTS, Sensor, parse_binding};
+use macro_editor::{MacroEditor, button_label};
+use renegade::config::{BUTTON_SLOTS, LEVELS, SLOTS, Sensor, parse_binding};
 use renegade::device::Device;
 use renegade::macros::{self, Repeat};
 use renegade::mouse::{self, Button, Led, Res, State};
@@ -126,6 +130,7 @@ struct ButtonEdit {
     key: String,
     raw: String,
     repeat: Repeat,
+    name: String,
     events: String,
 }
 
@@ -138,12 +143,18 @@ impl ButtonEdit {
             key: String::new(),
             raw: String::new(),
             repeat: Repeat::Times(1),
+            name: String::new(),
             events: String::new(),
         };
         match b {
-            Button::Macro { repeat, events } => {
+            Button::Macro {
+                repeat,
+                name,
+                events,
+            } => {
                 e.kind = Kind::Macro;
                 e.repeat = *repeat;
+                e.name = name.clone();
                 e.events = events.clone().unwrap_or_default();
             }
             Button::Action(a) => {
@@ -191,7 +202,7 @@ impl ButtonEdit {
 
     fn write(&self, dev: &mut Device, slot: usize) -> Res<()> {
         match self.kind {
-            Kind::Macro => mouse::set_macro(dev, slot, self.repeat, &self.tokens()),
+            Kind::Macro => mouse::set_macro(dev, slot, self.repeat, &self.name, &self.tokens()),
             _ => mouse::set_button(dev, slot, &self.action()),
         }
     }
@@ -275,6 +286,7 @@ enum Tab {
     Dpi,
     Light,
     Buttons,
+    Macros,
     Backup,
 }
 
@@ -288,6 +300,7 @@ struct App {
     tab: Tab,
     backup_path: String,
     confirm_restore: bool,
+    editor: MacroEditor,
 }
 
 impl App {
@@ -304,6 +317,7 @@ impl App {
             tab: Tab::Dpi,
             backup_path: format!("{home}/renegade-backup.bin"),
             confirm_restore: false,
+            editor: MacroEditor::new(),
         };
         app.reload();
         app
@@ -411,7 +425,8 @@ impl App {
         for (tab, label) in [
             (Tab::Dpi, "DPI и опрос"),
             (Tab::Light, "Подсветка"),
-            (Tab::Buttons, "Кнопки и макросы"),
+            (Tab::Buttons, "Кнопки"),
+            (Tab::Macros, "Макросы"),
             (Tab::Backup, "Резервная копия"),
         ] {
             let b = egui::Button::selectable(self.tab == tab, RichText::new(label).size(15.0))
@@ -428,6 +443,12 @@ impl App {
             self.backup_page(ui);
             return;
         }
+        if self.tab == Tab::Macros {
+            if let Some(a) = self.editor.ui(ui) {
+                self.assign(a);
+            }
+            return;
+        }
         let Some(m) = &mut self.edit else {
             let text = if self.busy.is_some() {
                 "Чтение настроек мыши…"
@@ -440,9 +461,35 @@ impl App {
         match self.tab {
             Tab::Dpi => dpi_page(ui, m),
             Tab::Light => light_page(ui, m),
-            Tab::Buttons => buttons_page(ui, m),
-            Tab::Backup => {}
+            Tab::Buttons => {
+                if let Some((name, events)) = buttons_page(ui, m, &self.editor.names()) {
+                    self.editor.open(&name, &events);
+                    self.tab = Tab::Macros;
+                }
+            }
+            Tab::Macros | Tab::Backup => {}
         }
+    }
+
+    /// Binds the macro from the editor to a button in the edited settings.
+    fn assign(&mut self, a: macro_editor::Assign) {
+        let Some(m) = &mut self.edit else {
+            self.status = Some((false, "сначала прочитайте настройки мыши".into()));
+            return;
+        };
+        let b = &mut m.buttons[a.slot];
+        b.kind = Kind::Macro;
+        b.repeat = a.repeat;
+        b.name = a.name;
+        b.events = a.events;
+        let n = BUTTON_SLOTS
+            .iter()
+            .position(|&s| s == a.slot)
+            .map_or(0, |i| i + 1);
+        self.status = Some((
+            true,
+            format!("Макрос назначен на кнопку {n} — нажмите «Применить»"),
+        ));
     }
 
     fn backup_page(&mut self, ui: &mut egui::Ui) {
@@ -515,6 +562,9 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.collect_results();
+        if self.tab == Tab::Macros {
+            self.editor.capture(ui);
+        }
         let bar = |fill| {
             Frame::new()
                 .fill(fill)
@@ -660,21 +710,6 @@ fn led_editor(
         });
 }
 
-/// Factory function of each physical slot (Cfg.ini), as a hint.
-fn factory(slot1: usize) -> &'static str {
-    match slot1 {
-        1 => "левый клик",
-        2 => "правый клик",
-        3 => "средняя",
-        4 => "назад",
-        5 => "вперёд",
-        9 => "огонь",
-        11 => "DPI +",
-        12 => "DPI −",
-        _ => "отключена",
-    }
-}
-
 fn kind_label(k: Kind) -> &'static str {
     match k {
         Kind::Simple(i) => SIMPLE[i].1,
@@ -685,24 +720,35 @@ fn kind_label(k: Kind) -> &'static str {
     }
 }
 
-fn buttons_page(ui: &mut egui::Ui, m: &mut Model) {
-    muted(ui, "Хотя бы одна кнопка должна остаться левым кликом.");
+/// Buttons in the OemDrv diagram numbering; returns a macro to open in the editor.
+fn buttons_page(
+    ui: &mut egui::Ui,
+    m: &mut Model,
+    library: &[(String, PathBuf)],
+) -> Option<(String, String)> {
+    muted(
+        ui,
+        "Номера как на схеме мыши в оригинальной программе. Хотя бы одна кнопка должна остаться левым кликом.",
+    );
     ui.add_space(8.0);
-    for slot in 0..SLOTS {
-        let shown =
-            PHYSICAL_SLOTS.contains(&(slot + 1)) || m.buttons[slot].kind != Kind::Simple(OFF);
-        if shown {
-            card(ui, &format!("Кнопка {}", slot + 1), |ui| {
-                button_editor(ui, slot, &mut m.buttons[slot])
-            });
-        }
+    let mut open = None;
+    for (b, &slot) in BUTTON_SLOTS.iter().enumerate() {
+        card(ui, &button_label(b), |ui| {
+            if let Some(req) = button_editor(ui, slot, &mut m.buttons[slot], library) {
+                open = Some(req);
+            }
+        });
     }
+    open
 }
 
-fn button_editor(ui: &mut egui::Ui, slot: usize, e: &mut ButtonEdit) {
-    if PHYSICAL_SLOTS.contains(&(slot + 1)) {
-        muted(ui, &format!("заводская функция: {}", factory(slot + 1)));
-    }
+fn button_editor(
+    ui: &mut egui::Ui,
+    slot: usize,
+    e: &mut ButtonEdit,
+    library: &[(String, PathBuf)],
+) -> Option<(String, String)> {
+    let mut open = None;
     ui.horizontal(|ui| {
         ComboBox::from_id_salt(("kind", slot))
             .width(220.0)
@@ -737,44 +783,72 @@ fn button_editor(ui: &mut egui::Ui, slot: usize, e: &mut ButtonEdit) {
                         .desired_width(120.0),
                 );
             }
-            Kind::Simple(_) | Kind::Macro => {}
+            Kind::Macro => {
+                let current = if e.name.is_empty() {
+                    "без имени".to_string()
+                } else {
+                    format!("«{}»", e.name)
+                };
+                ComboBox::from_id_salt(("lib", slot))
+                    .width(200.0)
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (name, path) in library {
+                            if ui.selectable_label(*name == e.name, name).clicked()
+                                && let Ok((n, text)) = macros::load_file(path)
+                            {
+                                e.name = n;
+                                e.events = text;
+                            }
+                        }
+                        if library.is_empty() {
+                            ui.label(RichText::new("библиотека пуста").color(MUTED));
+                        }
+                    });
+                if ui.button("Открыть в редакторе").clicked() {
+                    open = Some((e.name.clone(), e.events.clone()));
+                }
+            }
+            Kind::Simple(_) => {}
         }
     });
     if e.kind == Kind::Macro {
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label("Повтор:");
-            let times = match e.repeat {
-                Repeat::Times(n) => n,
-                _ => 1,
-            };
-            if ui
-                .selectable_label(matches!(e.repeat, Repeat::Times(_)), "N раз")
-                .clicked()
-            {
-                e.repeat = Repeat::Times(times);
-            }
-            if let Repeat::Times(n) = &mut e.repeat {
-                ui.add(DragValue::new(n).range(1..=253));
-            }
-            ui.selectable_value(&mut e.repeat, Repeat::Hold, "пока кнопка нажата");
-            ui.selectable_value(&mut e.repeat, Repeat::UntilPress, "до нажатия любой кнопки");
-        });
-        ui.add(
-            TextEdit::multiline(&mut e.events)
-                .hint_text("ctrl+c 50ms ctrl+v")
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .font(TextStyle::Monospace),
-        );
-        muted(
-            ui,
-            "a · ctrl+c · down:shift / up:shift · left right middle back forward · 50ms — пауза после предыдущего",
-        );
+        repeat_editor(ui, ("repeat", slot), &mut e.repeat);
+        let preview = if e.events.is_empty() {
+            "событий нет".to_string()
+        } else {
+            e.events.clone()
+        };
+        ui.label(RichText::new(preview).monospace().color(MUTED));
     }
     if let Err(msg) = e.check() {
         ui.label(RichText::new(msg).color(ERR));
     }
+    open
+}
+
+/// Repeat selector shared by the button list and the macro editor.
+fn repeat_editor(ui: &mut egui::Ui, id: impl egui::AsIdSalt, repeat: &mut Repeat) {
+    ui.push_id(id, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Повтор:");
+            let times = match *repeat {
+                Repeat::Times(n) => n,
+                _ => 1,
+            };
+            if ui
+                .selectable_label(matches!(repeat, Repeat::Times(_)), "N раз")
+                .clicked()
+            {
+                *repeat = Repeat::Times(times);
+            }
+            if let Repeat::Times(n) = repeat {
+                ui.add(DragValue::new(n).range(1..=253));
+            }
+            ui.selectable_value(repeat, Repeat::Hold, "пока кнопка нажата");
+            ui.selectable_value(repeat, Repeat::UntilPress, "до нажатия любой кнопки");
+        });
+    });
 }
 
 // ---------- look ----------
@@ -807,11 +881,15 @@ fn setup_style(ctx: &egui::Context) {
     let font = |bytes: &'static [u8]| Arc::new(FontData::from_static(bytes));
     fonts.font_data.insert(
         "geologica".into(),
-        font(include_bytes!("../../assets/fonts/Geologica-Regular.ttf")),
+        font(include_bytes!(
+            "../../../assets/fonts/Geologica-Regular.ttf"
+        )),
     );
     fonts.font_data.insert(
         "geologica-semibold".into(),
-        font(include_bytes!("../../assets/fonts/Geologica-SemiBold.ttf")),
+        font(include_bytes!(
+            "../../../assets/fonts/Geologica-SemiBold.ttf"
+        )),
     );
     let mut fallback = fonts
         .families

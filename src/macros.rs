@@ -6,6 +6,10 @@
 //! `op` = 0x80 (press) or 0x40 (release) | kind: 0 modifier bit, 1 HID key usage, 4 mouse button mask.
 //! The button itself is bound as `[6, slot, repeat]`.
 
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use crate::config::{MODS, checksum, key_name, key_usage};
 
 /// First macro area.
@@ -120,10 +124,20 @@ pub fn stored_len(count: u8) -> usize {
 /// Offset of the event count inside a macro area.
 pub const COUNT_OFFSET: usize = HEADER - 1;
 
-/// Serialises events into a macro area image (without the name, which only the Windows UI shows).
+/// Longest macro name OemDrv stores, in UTF-16 units (it truncates longer ones).
+pub const NAME_MAX: usize = 15;
+
+/// Serialises events and the macro name into a macro area image, as OemDrv does.
 #[must_use]
-pub fn encode(events: &[Event]) -> Vec<u8> {
+pub fn encode(events: &[Event], name: &str) -> Vec<u8> {
     let mut b = vec![0u8; HEADER];
+    let utf16: Vec<u8> = name
+        .encode_utf16()
+        .take(NAME_MAX)
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    b[0] = utf16.len() as u8;
+    b[1..1 + utf16.len()].copy_from_slice(&utf16);
     b[COUNT_OFFSET] = events.len() as u8;
     for e in events {
         let (kind, code) = match e.input {
@@ -166,7 +180,43 @@ pub fn decode(data: &[u8]) -> Option<Vec<Event>> {
         .collect()
 }
 
-fn input(name: &str) -> Result<Input, String> {
+/// Name stored in a macro area header.
+#[must_use]
+pub fn decode_name(data: &[u8]) -> String {
+    let n = usize::from(data.first().copied().unwrap_or(0)).min(2 * NAME_MAX);
+    let units: Vec<u16> = data
+        .get(1..1 + n)
+        .unwrap_or(&[])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// Folder of the macro library shared by the CLI (`@file`) and the GUI.
+#[must_use]
+pub fn library_dir() -> PathBuf {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("renegade").join("macros")
+}
+
+/// Reads a library file: (name from the file stem, event tokens).
+pub fn load_file(path: &Path) -> Result<(String, String), String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok((name, text.split_whitespace().collect::<Vec<_>>().join(" ")))
+}
+
+/// Parses one input name: key, modifier or mouse button.
+pub fn input(name: &str) -> Result<Input, String> {
     let find = |table: &[(&str, u8)]| table.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
     find(&MOUSE)
         .map(Input::Mouse)
@@ -175,7 +225,9 @@ fn input(name: &str) -> Result<Input, String> {
         .ok_or_else(|| format!("неизвестная клавиша: {name}"))
 }
 
-fn input_name(i: Input) -> String {
+/// Token name of an input, accepted back by `input`.
+#[must_use]
+pub fn input_name(i: Input) -> String {
     let find = |table: &[(&'static str, u8)], v: u8| {
         table
             .iter()
@@ -271,11 +323,14 @@ mod tests {
     fn decodes_real_macro() {
         let ev = decode(&LKM).unwrap();
         assert_eq!(describe(&ev), "left");
-        // Our encoding of the same events matches the device bytes (name aside).
+        assert_eq!(decode_name(&LKM), "lkm");
+        // Our encoding of the same events and name matches the device bytes, header included.
         assert_eq!(
-            encode(&ev)[COUNT_OFFSET..COUNT_OFFSET + 12],
-            LKM[COUNT_OFFSET..COUNT_OFFSET + 12]
+            encode(&ev, "lkm")[..COUNT_OFFSET + 12],
+            LKM[..COUNT_OFFSET + 12]
         );
+        let long = encode(&ev, "Очень длинное имя макроса");
+        assert_eq!(decode_name(&long).chars().count(), NAME_MAX);
     }
 
     #[test]
@@ -287,7 +342,7 @@ mod tests {
             "rctrl+f12 uparrow",
         ] {
             let ev = parse(&src.split(' ').collect::<Vec<_>>()).unwrap();
-            let img = encode(&ev);
+            let img = encode(&ev, "");
             assert!(img.len() <= MACRO_LEN);
             let back = decode(&img).unwrap();
             assert_eq!(back, ev);
@@ -307,7 +362,7 @@ mod tests {
         assert!(parse(&["50ms"]).is_err());
         assert!(parse(&["nosuchkey"]).is_err());
         assert!(parse(&vec!["down:a"; MAX_EVENTS + 1]).is_err());
-        let full = encode(&parse(&vec!["down:a"; MAX_EVENTS]).unwrap());
+        let full = encode(&parse(&vec!["down:a"; MAX_EVENTS]).unwrap(), "");
         assert!(full.len() <= MACRO_LEN && full.len() + 5 > MACRO_LEN);
         assert_eq!(Repeat::parse("hold").unwrap().code(), 0xff);
         assert!(Repeat::parse("254").is_err());

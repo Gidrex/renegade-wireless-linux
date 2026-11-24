@@ -4,9 +4,9 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use renegade::config::{LEVELS, PHYSICAL_SLOTS, SLOTS};
+use renegade::config::{BUTTON_SLOTS, LEVELS};
 use renegade::device::Device;
-use renegade::macros::Repeat;
+use renegade::macros::{self, Repeat};
 use renegade::mouse::{self, BACKUP_LEN, Button, DPI_LED_MODES, LOGO_MODES, Led, Res, State};
 
 const USAGE: &str = "\
@@ -18,8 +18,8 @@ renegade — настройка ARDOR GAMING Renegade Wireless под Linux (г�
   renegade dpi-color <уровень 1-8> <RRGGBB>  цвет уровня DPI
   renegade logo <off|static|breathing> [brightness=1-10] [speed=N]
   renegade dpi-led <off|static|breathing|neon> [color=RRGGBB] [brightness=1-10] [speed=N]
-  renegade button <1-16> <действие>          переназначить кнопку
-  renegade macro <1-16> <повтор> <события…>  записать макрос на кнопку
+  renegade button <1-8> <действие>           переназначить кнопку (номера как на схеме в OemDrv)
+  renegade macro <1-8> <повтор> <события…|@файл> [name=имя]  записать макрос на кнопку
   renegade backup <файл>                     сохранить память мыши
   renegade restore <файл>                    восстановить из backup
 
@@ -30,7 +30,9 @@ renegade — настройка ARDOR GAMING Renegade Wireless под Linux (г�
   события: a  ctrl+c (нажать по порядку, отпустить в обратном)  down:shift  up:shift
            left right middle back forward (кнопки мыши)  50ms (пауза после предыдущего, иначе 3ms)
   пример: renegade macro 5 1 ctrl+a 20ms ctrl+c
-          renegade macro 9 hold left 30ms           (автокликер)
+          renegade macro 6 hold left 30ms           (автокликер)
+          renegade macro 4 1 @~/.config/renegade/macros/copy.txt   (из библиотеки GUI)
+  кнопки: 1 левая, 2 правая, 3 колесо, 4/5/6 боковые, 7 DPI+, 8 DPI−
 ";
 
 fn main() -> ExitCode {
@@ -88,15 +90,18 @@ fn run(args: &[&str]) -> Res<()> {
             let led = o.apply(cur, mode_index(&DPI_LED_MODES, mode)?);
             mouse::set_dpi_led(&mut dev, led, o.color.unwrap_or(rgb))
         }
-        ("button", [slot, action]) => {
-            mouse::set_button(&mut dev, parse_index(slot, SLOTS)?, action)
+        ("button", [n, action]) => mouse::set_button(&mut dev, button_slot(n)?, action),
+        ("macro", [n, repeat, args @ ..]) if !args.is_empty() => {
+            let (name, text) = macro_source(args)?;
+            let tokens: Vec<&str> = text.split_whitespace().collect();
+            mouse::set_macro(
+                &mut dev,
+                button_slot(n)?,
+                Repeat::parse(repeat)?,
+                &name,
+                &tokens,
+            )
         }
-        ("macro", [slot, repeat, events @ ..]) if !events.is_empty() => mouse::set_macro(
-            &mut dev,
-            parse_index(slot, SLOTS)?,
-            Repeat::parse(repeat)?,
-            events,
-        ),
         ("backup", [file]) => {
             fs::write(file, mouse::backup(&mut dev)?)?;
             println!("сохранено {BACKUP_LEN} байт в {file}");
@@ -156,19 +161,19 @@ fn show(s: &State) -> Res<()> {
         );
     }
     println!("\nКнопки:");
-    for (slot, b) in s.buttons.iter().enumerate() {
-        let text = match b {
-            Button::Action(a) if a == "off" && !PHYSICAL_SLOTS.contains(&(slot + 1)) => continue,
+    for (i, &slot) in BUTTON_SLOTS.iter().enumerate() {
+        let text = match &s.buttons[slot] {
             Button::Action(a) => a.clone(),
-            Button::Macro { repeat, events } => {
-                format!(
-                    "macro {}: {}",
-                    repeat.name(),
-                    events.as_deref().unwrap_or("? (повреждён)")
-                )
+            Button::Macro {
+                repeat,
+                name,
+                events,
+            } => {
+                let events = events.as_deref().unwrap_or("? (повреждён)");
+                format!("macro {} «{name}»: {events}", repeat.name())
             }
         };
-        println!("  {:>2}: {text}", slot + 1);
+        println!("  {}: {text}", i + 1);
     }
     Ok(())
 }
@@ -226,6 +231,27 @@ fn mode_name(modes: &[&str], code: u8) -> String {
         .map_or_else(|| format!("? (код {code})"), |m| (*m).to_string())
 }
 
+/// Button number 1..8 (as on the OemDrv mouse diagram) → memory slot.
+fn button_slot(s: &str) -> Res<usize> {
+    Ok(BUTTON_SLOTS[parse_index(s, BUTTON_SLOTS.len())?])
+}
+
+/// Macro name and event tokens: `@file` from the library, or inline tokens with an optional `name=…`.
+fn macro_source(args: &[&str]) -> Res<(String, String)> {
+    if let [file] = args
+        && let Some(path) = file.strip_prefix('@')
+    {
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => std::path::PathBuf::from(env::var("HOME")?).join(rest),
+            None => path.into(),
+        };
+        return Ok(macros::load_file(&path)?);
+    }
+    let (names, events): (Vec<&str>, Vec<&str>) = args.iter().partition(|a| a.starts_with("name="));
+    let name = names.last().map_or("", |n| &n["name=".len()..]);
+    Ok((name.to_string(), events.join(" ")))
+}
+
 /// 1-based index from the command line → 0-based.
 fn parse_index(s: &str, max: usize) -> Res<usize> {
     match s.parse::<usize>() {
@@ -256,8 +282,12 @@ mod tests {
     fn arg_parsing() {
         assert_eq!(parse_rgb("#00a29A").unwrap(), [0x00, 0xa2, 0x9a]);
         assert!(parse_rgb("fff").is_err());
-        assert_eq!(parse_index("16", SLOTS).unwrap(), 15);
-        assert!(parse_index("0", SLOTS).is_err());
+        assert_eq!(parse_index("8", LEVELS).unwrap(), 7);
+        assert!(parse_index("0", LEVELS).is_err());
+        assert_eq!(button_slot("4").unwrap(), 4);
+        assert!(button_slot("9").is_err());
+        let (name, ev) = macro_source(&["a", "name=Копия", "50ms"]).unwrap();
+        assert_eq!((name.as_str(), ev.as_str()), ("Копия", "a 50ms"));
         let o = Opts::parse(&["color=ff0000", "speed=3"]).unwrap();
         assert_eq!(
             (o.color, o.speed, o.brightness),

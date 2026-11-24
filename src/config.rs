@@ -31,8 +31,20 @@ pub const HEADER_LEN: usize = 0xA0;
 pub const LEVELS: usize = 8;
 /// Number of button slots.
 pub const SLOTS: usize = 16;
-/// Slots wired to physical buttons (1-based, from Cfg.ini K*_1 entries).
-pub const PHYSICAL_SLOTS: [usize; 10] = [1, 2, 3, 4, 5, 6, 9, 10, 11, 12];
+/// Memory slot (0-based) of each physical button, in the numbering of the mouse diagram
+/// in OemDrv (button 1..8): left, right, wheel, side front, side rear, side middle, DPI+, DPI−.
+pub const BUTTON_SLOTS: [usize; 8] = [0, 1, 2, 4, 3, 8, 10, 11];
+/// Factory function of each physical button (Cfg.ini K*_1).
+pub const BUTTON_FACTORY: [&str; 8] = [
+    "left",
+    "right",
+    "middle",
+    "forward",
+    "back",
+    "click:58:3",
+    "dpi-up",
+    "dpi-down",
+];
 
 /// LED brightness levels 1..=10 as stored in memory.
 const BRIGHTNESS: [u8; 10] = [0x01, 0x1e, 0x3c, 0x5a, 0x80, 0x96, 0xb4, 0xd2, 0xe6, 0xff];
